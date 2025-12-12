@@ -91,7 +91,7 @@ def _is_missing_date(x) -> bool:
     return x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x)
 
 
-def _calc_prazo(card_due, dueComplete, report_dt: datetime):
+def _calc_prazo(card_due, card_card_dueComplete, report_dt: datetime):
     """
     Regra:
       - card fechado => Concluído
@@ -99,7 +99,7 @@ def _calc_prazo(card_due, dueComplete, report_dt: datetime):
       - report_dt > due => Em atraso
       - senão => Em dia
     """
-    if bool(dueComplete):
+    if bool(card_card_dueComplete):
         return "Concluído"
 
     if _is_missing_date(card_due):
@@ -140,7 +140,7 @@ def parse_trello(data: dict, report_dt: datetime):
             "card_id": c.get("id"),
             "card_name": c.get("name"),
             "list_name": lists.get(c.get("idList")),
-            "dueComplete": bool(c.get("closed")),
+            "card_dueComplete": bool(c.get("closed")),
             "card_due": _safe_dt(c.get("due")),
             "labels": ", ".join(sorted(set([x for x in card_labels if x]))),
             "members": ", ".join([members.get(m, m) for m in id_members]),
@@ -153,7 +153,7 @@ def parse_trello(data: dict, report_dt: datetime):
     if not df_cards.empty:
         df_cards["Prazo"] = [
             _calc_prazo(due, closed, report_dt)
-            for due, closed in zip(df_cards.get("card_due", []), df_cards.get("dueComplete", []))
+            for due, closed in zip(df_cards.get("card_due", []), df_cards.get("card_dueComplete", []))
         ]
 
     # Checklist Items (simples)
