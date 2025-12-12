@@ -114,13 +114,10 @@ def _label_display(lbl: dict) -> str:
 
 
 def _calc_prazo(card_due: datetime | None, card_closed: bool | None, report_dt: datetime) -> str:
-    """
-    Nova regra:
-      - Se card_closed == True -> "Concluído"
-      - Se não houver card_due -> "Em dia"
-      - Se report_dt.date() > card_due.date() -> "Em atraso"
-      - Senão -> "Em dia"
-    """
+    # Regra atual:
+    # - card concluído => "Concluído"
+    # - sem due => "Em dia"
+    # - report_dt > due => "Em atraso"
     if bool(card_closed):
         return "Concluído"
     if not card_due:
@@ -243,31 +240,7 @@ def parse_trello_export(
     if not df_cards.empty:
         df_cards = df_cards.merge(agg, how="left", on="card_id")
 
-    # ----------------- FlatExport
-    if not df_checkitems.empty and not df_cards.empty:
-        df_flat = df_checkitems.merge(df_cards, how="left", on="card_id")
-
-        # Prazo agora vem do card (card_closed -> Concluído, senão atraso/dia)
-        if "Prazo" not in df_flat.columns:
-            df_flat["Prazo"] = df_flat.apply(
-                lambda r: _calc_prazo(r.get("card_due"), r.get("card_closed"), report_dt),
-                axis=1
-            )
-
-        preferred = [
-            "card_id", "idShort", "card_name", "list_name", "card_closed", "labels", "members",
-            "url", "card_dateLastActivity", "card_start", "card_due", "Prazo",
-            "checklist_id", "checklist_name", "checklist_pos",
-            "checkitem_id", "checkitem_name", "state", "checkitem_pos", "checkitem_due",
-            "responsavel", "responsavel_id",
-            "card_desc",
-        ]
-        cols = [c for c in preferred if c in df_flat.columns] + [c for c in df_flat.columns if c not in preferred]
-        df_flat = df_flat[cols]
-    else:
-        df_flat = pd.DataFrame()
-
-    # ----------------- ChecklistItems (inclui card_due, card_closed e Prazo)
+    # ----------------- ChecklistItems (inclui card_due, card_closed e Prazo do card)
     if not df_checkitems.empty and not df_cards.empty:
         df_checkitems2 = df_checkitems.merge(
             df_cards[["card_id", "card_due", "card_closed", "Prazo"]],
@@ -301,8 +274,35 @@ def parse_trello_export(
         if df_checklists.empty:
             df_checklists = pd.DataFrame(columns=["checklist_id", "card_id", "checklist_name", "checklist_pos"])
 
-    # ----------------- Explore pendências (usa Prazo do card; itens completos fora)
+    # =========================
+    # FlatExport CORRIGIDA:
+    # - Deve trazer TODOS os cards
+    # - E todos os itens de checklist (se houver)
+    # =========================
+    if not df_cards.empty:
+        if not df_checkitems.empty:
+            # LEFT JOIN: Cards -> Itens (garante cards sem itens)
+            df_flat = df_cards.merge(df_checkitems, how="left", on="card_id", suffixes=("", "_item"))
+        else:
+            # sem itens, flat é só cards
+            df_flat = df_cards.copy()
+    else:
+        df_flat = pd.DataFrame()
+
+    # Reordena colunas da FlatExport para ficar consistente
     if not df_flat.empty:
+        preferred_flat = [
+            "card_id", "idShort", "card_name", "list_name", "card_closed",
+            "labels", "members", "url", "card_dateLastActivity", "card_start", "card_due", "Prazo",
+            "checklist_id", "checklist_name", "checkitem_id", "checkitem_name", "state",
+            "checkitem_pos", "checkitem_due", "responsavel", "responsavel_id",
+            "card_desc", "checklist_items",
+        ]
+        cols = [c for c in preferred_flat if c in df_flat.columns] + [c for c in df_flat.columns if c not in preferred_flat]
+        df_flat = df_flat[cols]
+
+    # ----------------- Explore pendências (somente aqui filtra)
+    if not df_flat.empty and "state" in df_flat.columns:
         df_explore = df_flat[df_flat["state"].fillna("").str.lower() != "complete"].copy()
         keep = [
             "list_name", "card_name", "labels", "url", "card_due", "Prazo",
@@ -331,9 +331,9 @@ def parse_trello_export(
 # Streamlit UI
 # =========================
 
-st.set_page_config(page_title="Trello JSON → Excel (Prazo = Concluído)", layout="wide")
+st.set_page_config(page_title="Trello JSON → Excel (Flat sem filtro)", layout="wide")
 st.title("Trello JSON → Excel (Cards + Checklists + Items + FlatExport + Explore)")
-st.caption("Coluna 'Prazo': se card concluído => 'Concluído'; caso contrário => 'Em dia'/'Em atraso' pelo due do card.")
+st.caption("FlatExport agora traz TODOS os cards e TODOS os itens de checklist (sem filtro). Explore mantém filtros e pendências.")
 
 uploaded = st.file_uploader("Envie o JSON exportado do Trello", type=["json"])
 
@@ -370,11 +370,11 @@ if uploaded:
         df_explore_filtered = df_explore_filtered[df_explore_filtered["labels"].apply(has_any_label)].copy()
 
     # -------- Prévia
-    st.subheader("Prévia - Explore (pendências)")
-    st.dataframe(df_explore_filtered.head(300), use_container_width=True)
+    st.subheader("Prévia - FlatExport (SEM filtro)")
+    st.dataframe(df_flat.head(300), use_container_width=True)
 
-    with st.expander("Prévia - FlatExport"):
-        st.dataframe(df_flat.head(200), use_container_width=True)
+    with st.expander("Prévia - Explore (pendências)"):
+        st.dataframe(df_explore_filtered.head(300), use_container_width=True)
 
     with st.expander("Prévia - Cards"):
         st.dataframe(df_cards.head(200), use_container_width=True)
@@ -395,8 +395,8 @@ if uploaded:
                 "Cards": df_cards,
                 "Checklists": df_checklists,
                 "ChecklistItems": df_checkitems,
-                "FlatExport": df_flat,
-                "Explore": df_explore_filtered,
+                "FlatExport": df_flat,              # SEM filtro
+                "Explore": df_explore_filtered,     # COM filtro aplicado
             }
         )
 
@@ -435,7 +435,7 @@ if uploaded:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
             st.download_button(
-                "Baixar FlatExport.xlsx",
+                "Baixar FlatExport.xlsx (SEM filtro)",
                 data=df_to_xlsx_bytes(df_flat, "FlatExport"),
                 file_name="FlatExport.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
