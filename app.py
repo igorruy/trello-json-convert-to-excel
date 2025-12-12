@@ -30,19 +30,16 @@ def _pick_excel_engine() -> str:
 
 
 def _sanitize_value_for_excel(v: Any) -> Any:
-    # pandas Timestamp
     if isinstance(v, pd.Timestamp):
         if v.tz is not None:
             return v.tz_convert(None).to_pydatetime()
         return v.to_pydatetime()
 
-    # python datetime
     if isinstance(v, datetime):
         if v.tzinfo is not None:
             return v.replace(tzinfo=None)
         return v
 
-    # dict/list
     if isinstance(v, (dict, list)):
         try:
             return json.dumps(v, ensure_ascii=False)
@@ -83,8 +80,6 @@ def dfs_to_xlsx_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     with pd.ExcelWriter(output, engine=engine) as writer:
         for sheet, df in dfs.items():
             df2 = sanitize_df_for_excel(df)
-
-            # garante que a aba exista mesmo vazia
             if df2 is None or df2.empty:
                 pd.DataFrame({"info": ["Sem dados"]}).to_excel(writer, index=False, sheet_name=sheet[:31])
             else:
@@ -101,7 +96,6 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 # =========================
 
 def _safe_dt(dt_str: str | None):
-    """Converte ISO do Trello para datetime naive (sem tzinfo), para não quebrar Excel."""
     if not dt_str:
         return None
     try:
@@ -119,27 +113,26 @@ def _label_display(lbl: dict) -> str:
     return f"(label:{color})" if color else "(label)"
 
 
-def _calc_prazo(card_due: datetime | None, state: str | None, completed_at: datetime | None, report_dt: datetime) -> str:
+def _calc_prazo(card_due: datetime | None, card_closed: bool | None, report_dt: datetime) -> str:
     """
-    Prazo:
-      - deadline = card_due
-      - se concluído: compara completed_at (se existir) vs card_due; senão usa report_dt (fallback)
-      - se pendente: compara report_dt vs card_due
-      - se não houver card_due: "Em dia"
+    Nova regra:
+      - Se card_closed == True -> "Concluído"
+      - Se não houver card_due -> "Em dia"
+      - Se report_dt.date() > card_due.date() -> "Em atraso"
+      - Senão -> "Em dia"
     """
+    if bool(card_closed):
+        return "Concluído"
     if not card_due:
         return "Em dia"
-
-    state_norm = (state or "").strip().lower()
-    ref_dt = report_dt
-    if state_norm == "complete":
-        ref_dt = completed_at or report_dt
-
-    return "Em atraso" if ref_dt.date() > card_due.date() else "Em dia"
+    return "Em atraso" if report_dt.date() > card_due.date() else "Em dia"
 
 
-def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # Mapas auxiliares
+def parse_trello_export(
+    data: dict,
+    report_dt: datetime
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+
     lists_map = {l.get("id"): l.get("name") for l in data.get("lists", []) or []}
     members_map = {
         m.get("id"): (m.get("fullName") or m.get("username") or m.get("id"))
@@ -147,7 +140,7 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
     }
     labels_map = {lb.get("id"): _label_display(lb) for lb in data.get("labels", []) or []}
 
-    # ----------------- Checklists (1 linha por checklist) e itens (1 linha por item)
+    # ----------------- Checklists e itens
     checklist_rows = []
     checkitem_rows = []
 
@@ -169,13 +162,6 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
             id_member = it.get("idMember")
             responsavel = members_map.get(id_member) if id_member else None
 
-            completed_at = _safe_dt(
-                it.get("dateCompleted")
-                or it.get("dateComplete")
-                or it.get("completedAt")
-                or it.get("dateCompletion")
-            )
-
             checkitem_rows.append(
                 {
                     "checklist_id": cl_id,
@@ -188,20 +174,18 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
                     "checkitem_due": _safe_dt(it.get("due")),
                     "responsavel_id": id_member,
                     "responsavel": responsavel,
-                    "checkitem_completed_at": completed_at,
                 }
             )
 
     df_checklists = pd.DataFrame(checklist_rows)
     df_checkitems = pd.DataFrame(checkitem_rows)
 
-    # ----------------- Cards (1 linha por card)
+    # ----------------- Cards
     card_rows = []
     for c in data.get("cards", []) or []:
         card_id = c.get("id")
         id_list = c.get("idList")
 
-        # labels do card
         card_labels = []
         for lb in c.get("labels", []) or []:
             lb_id = lb.get("id")
@@ -211,20 +195,10 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
                 card_labels.append(_label_display(lb))
         card_labels = sorted({x for x in card_labels if x})
 
-        # membros do card
         card_members = [members_map.get(mid, mid) for mid in (c.get("idMembers", []) or [])]
 
         card_due = _safe_dt(c.get("due"))
-        card_closed = c.get("closed")
-        card_last = _safe_dt(c.get("dateLastActivity"))
-
-        # Prazo para card: se fechado usa lastActivity como proxy de conclusão; se aberto usa report_dt
-        card_prazo = _calc_prazo(
-            card_due=card_due,
-            state="complete" if card_closed else "incomplete",
-            completed_at=card_last if card_closed else None,
-            report_dt=report_dt,
-        )
+        card_closed = bool(c.get("closed"))
 
         card_rows.append(
             {
@@ -239,16 +213,16 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
                 "shortLink": c.get("shortLink"),
                 "card_due": card_due,
                 "card_start": _safe_dt(c.get("start")),
-                "card_dateLastActivity": card_last,
+                "card_dateLastActivity": _safe_dt(c.get("dateLastActivity")),
                 "labels": ", ".join(card_labels),
                 "members": ", ".join(card_members),
-                "Prazo": card_prazo,
+                "Prazo": _calc_prazo(card_due, card_closed, report_dt),
             }
         )
 
     df_cards = pd.DataFrame(card_rows)
 
-    # ----------------- Agregado de itens por card (para coluna em Cards)
+    # ----------------- Agregado checklist_items em Cards
     if not df_checkitems.empty:
         df_ci_sorted = df_checkitems.sort_values(
             by=["card_id", "checklist_name", "checkitem_pos"], na_position="last"
@@ -269,26 +243,23 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
     if not df_cards.empty:
         df_cards = df_cards.merge(agg, how="left", on="card_id")
 
-    # ----------------- FlatExport (1 linha por item, com dados do card)
+    # ----------------- FlatExport
     if not df_checkitems.empty and not df_cards.empty:
         df_flat = df_checkitems.merge(df_cards, how="left", on="card_id")
-        # Prazo para item: sempre considera card_due do card e conclusão do item (quando existir)
-        df_flat["Prazo"] = df_flat.apply(
-            lambda r: _calc_prazo(
-                card_due=r.get("card_due"),
-                state=r.get("state"),
-                completed_at=r.get("checkitem_completed_at"),
-                report_dt=report_dt
-            ),
-            axis=1
-        )
+
+        # Prazo agora vem do card (card_closed -> Concluído, senão atraso/dia)
+        if "Prazo" not in df_flat.columns:
+            df_flat["Prazo"] = df_flat.apply(
+                lambda r: _calc_prazo(r.get("card_due"), r.get("card_closed"), report_dt),
+                axis=1
+            )
 
         preferred = [
             "card_id", "idShort", "card_name", "list_name", "card_closed", "labels", "members",
             "url", "card_dateLastActivity", "card_start", "card_due", "Prazo",
             "checklist_id", "checklist_name", "checklist_pos",
             "checkitem_id", "checkitem_name", "state", "checkitem_pos", "checkitem_due",
-            "responsavel", "responsavel_id", "checkitem_completed_at",
+            "responsavel", "responsavel_id",
             "card_desc",
         ]
         cols = [c for c in preferred if c in df_flat.columns] + [c for c in df_flat.columns if c not in preferred]
@@ -296,34 +267,26 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
     else:
         df_flat = pd.DataFrame()
 
-    # ----------------- ChecklistItems (também recebe Prazo, via card_due)
+    # ----------------- ChecklistItems (inclui card_due, card_closed e Prazo)
     if not df_checkitems.empty and not df_cards.empty:
-        df_checkitems2 = df_checkitems.merge(df_cards[["card_id", "card_due"]], how="left", on="card_id")
-        df_checkitems2["Prazo"] = df_checkitems2.apply(
-            lambda r: _calc_prazo(
-                card_due=r.get("card_due"),
-                state=r.get("state"),
-                completed_at=r.get("checkitem_completed_at"),
-                report_dt=report_dt
-            ),
-            axis=1
+        df_checkitems2 = df_checkitems.merge(
+            df_cards[["card_id", "card_due", "card_closed", "Prazo"]],
+            how="left",
+            on="card_id"
         )
-        # reordena
         preferred_ci = [
-            "card_id", "card_due", "Prazo",
+            "card_id", "card_due", "card_closed", "Prazo",
             "checklist_id", "checklist_name",
             "checkitem_id", "checkitem_name", "state", "checkitem_pos", "checkitem_due",
-            "responsavel", "responsavel_id", "checkitem_completed_at",
+            "responsavel", "responsavel_id",
         ]
         cols = [c for c in preferred_ci if c in df_checkitems2.columns] + [c for c in df_checkitems2.columns if c not in preferred_ci]
         df_checkitems = df_checkitems2[cols]
     else:
-        # se não tiver cards, ainda cria Prazo como "Em dia"
         if not df_checkitems.empty and "Prazo" not in df_checkitems.columns:
             df_checkitems["Prazo"] = "Em dia"
 
-    # ----------------- Checklists (opcional: status gerencial por checklist)
-    # Aqui adicionamos uma visão resumida por checklist: total, pendentes, % concluído
+    # ----------------- Checklists resumo (opcional)
     if not df_checkitems.empty:
         tmp = df_checkitems.copy()
         tmp["is_complete"] = tmp["state"].fillna("").str.lower().eq("complete")
@@ -335,11 +298,10 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
         grp["perc_concluido"] = (grp["concluidos"] / grp["total_itens"]).round(4)
         df_checklists = df_checklists.merge(grp, how="left", on=["card_id", "checklist_id", "checklist_name"])
     else:
-        # mantém estrutura
         if df_checklists.empty:
             df_checklists = pd.DataFrame(columns=["checklist_id", "card_id", "checklist_name", "checklist_pos"])
 
-    # ----------------- Explore: pendências (com filtro por label)
+    # ----------------- Explore pendências (usa Prazo do card; itens completos fora)
     if not df_flat.empty:
         df_explore = df_flat[df_flat["state"].fillna("").str.lower() != "complete"].copy()
         keep = [
@@ -348,11 +310,14 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
         ]
         keep = [c for c in keep if c in df_explore.columns]
         df_explore = df_explore[keep]
-        df_explore = df_explore.sort_values(by=[c for c in ["list_name", "Prazo", "card_due", "card_name"] if c in df_explore.columns], na_position="last")
+        df_explore = df_explore.sort_values(
+            by=[c for c in ["list_name", "Prazo", "card_due", "card_name"] if c in df_explore.columns],
+            na_position="last"
+        )
     else:
         df_explore = pd.DataFrame()
 
-    # Segurança extra para UI/export
+    # Segurança extra (UI/export)
     df_cards = _ensure_unique_columns(df_cards) if not df_cards.empty else df_cards
     df_checklists = _ensure_unique_columns(df_checklists) if not df_checklists.empty else df_checklists
     df_checkitems = _ensure_unique_columns(df_checkitems) if not df_checkitems.empty else df_checkitems
@@ -366,9 +331,9 @@ def parse_trello_export(data: dict, report_dt: datetime) -> Tuple[pd.DataFrame, 
 # Streamlit UI
 # =========================
 
-st.set_page_config(page_title="Trello JSON → Excel (com Prazo)", layout="wide")
+st.set_page_config(page_title="Trello JSON → Excel (Prazo = Concluído)", layout="wide")
 st.title("Trello JSON → Excel (Cards + Checklists + Items + FlatExport + Explore)")
-st.caption("Inclui coluna 'Prazo' (Em dia / Em atraso) considerando o due do card e a data do relatório (ou conclusão quando existir).")
+st.caption("Coluna 'Prazo': se card concluído => 'Concluído'; caso contrário => 'Em dia'/'Em atraso' pelo due do card.")
 
 uploaded = st.file_uploader("Envie o JSON exportado do Trello", type=["json"])
 
@@ -383,7 +348,7 @@ if uploaded:
 
     df_cards, df_checkitems, df_checklists, df_flat, df_explore = parse_trello_export(data, report_dt)
 
-    # ---------------- Filtro por label (Explore)
+    # -------- Filtro Explore por label
     st.subheader("Explore (pendências) – filtros por label")
 
     all_labels = []
@@ -394,11 +359,7 @@ if uploaded:
                 uniq.add(part)
         all_labels = sorted(uniq)
 
-    selected_labels = st.multiselect(
-        "Filtrar por label (mostra cards que contenham pelo menos uma das labels selecionadas)",
-        options=all_labels,
-        default=[],
-    )
+    selected_labels = st.multiselect("Filtrar por label", options=all_labels, default=[])
 
     df_explore_filtered = df_explore.copy()
     if selected_labels and not df_explore_filtered.empty and "labels" in df_explore_filtered.columns:
@@ -408,7 +369,7 @@ if uploaded:
 
         df_explore_filtered = df_explore_filtered[df_explore_filtered["labels"].apply(has_any_label)].copy()
 
-    # ---------------- Prévia
+    # -------- Prévia
     st.subheader("Prévia - Explore (pendências)")
     st.dataframe(df_explore_filtered.head(300), use_container_width=True)
 
@@ -424,19 +385,18 @@ if uploaded:
     with st.expander("Prévia - Checklists"):
         st.dataframe(df_checklists.head(200), use_container_width=True)
 
-    # ---------------- Exportação
+    # -------- Exportação
     st.divider()
     st.subheader("Exportação (.xlsx)")
 
     try:
-        # Consolidado: todas as visões
         consolidated_bytes = dfs_to_xlsx_bytes(
             {
                 "Cards": df_cards,
                 "Checklists": df_checklists,
                 "ChecklistItems": df_checkitems,
                 "FlatExport": df_flat,
-                "Explore": df_explore_filtered,  # exporta com filtro aplicado
+                "Explore": df_explore_filtered,
             }
         )
 
@@ -447,7 +407,6 @@ if uploaded:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        # Individuais
         c1, c2 = st.columns(2)
         with c1:
             st.download_button(
@@ -488,7 +447,6 @@ if uploaded:
         st.stop()
     except ValueError as e:
         st.error(f"Erro ao exportar Excel: {e}")
-        st.info("Se persistir, cole o detalhe do log para eu ajustar a sanitização.")
         st.stop()
 
 else:
