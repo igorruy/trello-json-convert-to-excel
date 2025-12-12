@@ -10,17 +10,15 @@ import streamlit as st
 # ------------------------- Helpers -------------------------
 
 def _safe_dt(dt_str: str | None):
-    """Converte ISO datetime do Trello para datetime (ou None)."""
     if not dt_str:
         return None
     try:
         return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
     except Exception:
-        return dt_str  # fallback: mantém string
+        return dt_str
 
 
 def _label_display(lbl: dict) -> str:
-    """Exibe label do Trello com fallback em color caso name esteja vazio."""
     name = (lbl.get("name") or "").strip()
     if name:
         return name
@@ -29,10 +27,7 @@ def _label_display(lbl: dict) -> str:
 
 
 def _ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Garante que um DataFrame não tenha colunas duplicadas.
-    (PyArrow/Streamlit quebra quando há colunas repetidas.)
-    """
+    """Evita colunas duplicadas (Streamlit/PyArrow quebra)."""
     cols = list(df.columns)
     seen = {}
     new_cols = []
@@ -43,23 +38,64 @@ def _ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             seen[c] += 1
             new_cols.append(f"{c}__dup{seen[c]}")
-    df = df.copy()
-    df.columns = new_cols
-    return df
+    out = df.copy()
+    out.columns = new_cols
+    return out
+
+
+def _pick_excel_engine() -> str:
+    """
+    Seleciona um engine disponível:
+    - xlsxwriter (preferido)
+    - openpyxl (fallback)
+    """
+    try:
+        import xlsxwriter  # noqa: F401
+        return "xlsxwriter"
+    except Exception:
+        pass
+
+    try:
+        import openpyxl  # noqa: F401
+        return "openpyxl"
+    except Exception:
+        pass
+
+    raise ModuleNotFoundError(
+        "Nenhum engine de Excel disponível. Instale 'XlsxWriter' ou 'openpyxl' no requirements.txt."
+    )
+
+
+def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
+    """Exporta um único DataFrame para XLSX (1 aba)."""
+    engine = _pick_excel_engine()
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name[:31])  # Excel limita 31 chars
+    return output.getvalue()
+
+
+def dfs_to_xlsx_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
+    """Exporta múltiplos DataFrames para XLSX (múltiplas abas)."""
+    engine = _pick_excel_engine()
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        for name, df in dfs.items():
+            df.to_excel(writer, index=False, sheet_name=name[:31])
+    return output.getvalue()
 
 
 # ------------------------- Parser -------------------------
 
 def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # Mapas auxiliares
-    lists_map = {l.get("id"): l.get("name") for l in data.get("lists", []) or []}
+    lists_map = {l.get("id"): l.get("name") for l in (data.get("lists", []) or [])}
     members_map = {
         m.get("id"): (m.get("fullName") or m.get("username") or m.get("id"))
         for m in (data.get("members", []) or [])
     }
     labels_map = {lb.get("id"): _label_display(lb) for lb in (data.get("labels", []) or [])}
 
-    # -------- Checklists (1 linha por checklist) e itens (1 linha por item)
+    # Checklists e itens
     checklist_rows = []
     checkitem_rows = []
 
@@ -94,13 +130,12 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
     df_checklists = pd.DataFrame(checklist_rows)
     df_checkitems = pd.DataFrame(checkitem_rows)
 
-    # -------- Cards (1 linha por card)
+    # Cards
     card_rows = []
     for c in (data.get("cards", []) or []):
         card_id = c.get("id")
         id_list = c.get("idList")
 
-        # Labels no card podem vir como lista de dicts; tenta mapear por id, senão usa fallback
         card_labels = []
         for lb in (c.get("labels", []) or []):
             lb_id = lb.get("id")
@@ -133,7 +168,7 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
 
     df_cards = pd.DataFrame(card_rows)
 
-    # -------- Agregado de checklist (texto) por card para a aba Cards
+    # Agregado de checklist por card (texto)
     if not df_checkitems.empty:
         df_ci_sorted = df_checkitems.sort_values(
             by=["card_id", "checklist_name", "checkitem_pos"], na_position="last"
@@ -154,7 +189,7 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
     if not df_cards.empty:
         df_cards = df_cards.merge(agg, how="left", on="card_id")
 
-    # -------- FlatExport (1 linha por item de checklist, com dados do card)
+    # FlatExport (1 linha por item)
     if not df_checkitems.empty and not df_cards.empty:
         df_flat = df_checkitems.merge(df_cards, how="left", on="card_id")
 
@@ -178,7 +213,7 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
             ]
         )
 
-    # Segurança extra: garante que nenhuma aba fique com colunas duplicadas
+    # Segurança extra contra colunas duplicadas
     df_cards = _ensure_unique_columns(df_cards)
     df_checklists = _ensure_unique_columns(df_checklists)
     df_checkitems = _ensure_unique_columns(df_checkitems)
@@ -187,20 +222,12 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
     return df_cards, df_checkitems, df_checklists, df_flat
 
 
-def to_excel_bytes(df_cards: pd.DataFrame, df_checkitems: pd.DataFrame, df_checklists: pd.DataFrame, df_flat: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_cards.to_excel(writer, index=False, sheet_name="Cards")
-        df_checklists.to_excel(writer, index=False, sheet_name="Checklists")
-        df_checkitems.to_excel(writer, index=False, sheet_name="ChecklistItems")
-        df_flat.to_excel(writer, index=False, sheet_name="FlatExport")
-    return output.getvalue()
-
-
 # ------------------------- Streamlit UI -------------------------
 
 st.set_page_config(page_title="Trello JSON → Excel", layout="wide")
 st.title("Trello JSON → Excel (Cards + Checklists + FlatExport)")
+
+st.caption("Exporta um Excel consolidado (com abas) e também arquivos XLSX individuais por tabela.")
 
 uploaded = st.file_uploader("Envie o JSON exportado do Trello", type=["json"])
 
@@ -211,8 +238,10 @@ if uploaded:
         st.error(f"Não consegui ler o JSON: {e}")
         st.stop()
 
+    # Parse
     df_cards, df_checkitems, df_checklists, df_flat = parse_trello_export(data)
 
+    # Prévia
     st.subheader("Prévia - FlatExport (1 linha por item de checklist)")
     st.dataframe(df_flat.head(200), use_container_width=True)
 
@@ -225,13 +254,61 @@ if uploaded:
     with st.expander("Prévia - Checklists"):
         st.dataframe(df_checklists.head(200), use_container_width=True)
 
-    xlsx_bytes = to_excel_bytes(df_cards, df_checkitems, df_checklists, df_flat)
+    # Downloads
+    st.divider()
+    st.subheader("Exportação")
 
-    st.download_button(
-        label="Baixar Excel (.xlsx)",
-        data=xlsx_bytes,
-        file_name="trello_export.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    # 1) Consolidado
+    try:
+        all_bytes = dfs_to_xlsx_bytes(
+            {
+                "Cards": df_cards,
+                "Checklists": df_checklists,
+                "ChecklistItems": df_checkitems,
+                "FlatExport": df_flat,
+            }
+        )
+        st.download_button(
+            "Baixar Excel consolidado (todas as abas)",
+            data=all_bytes,
+            file_name="trello_export_consolidado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except ModuleNotFoundError as e:
+        st.error(str(e))
+        st.info("Solução: adicione `XlsxWriter` (recomendado) ou `openpyxl` no requirements.txt.")
+        st.stop()
+
+    # 2) Individuais
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            "Baixar Cards.xlsx",
+            data=df_to_xlsx_bytes(df_cards, sheet_name="Cards"),
+            file_name="Cards.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.download_button(
+            "Baixar Checklists.xlsx",
+            data=df_to_xlsx_bytes(df_checklists, sheet_name="Checklists"),
+            file_name="Checklists.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    with col2:
+        st.download_button(
+            "Baixar ChecklistItems.xlsx",
+            data=df_to_xlsx_bytes(df_checkitems, sheet_name="ChecklistItems"),
+            file_name="ChecklistItems.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.download_button(
+            "Baixar FlatExport.xlsx",
+            data=df_to_xlsx_bytes(df_flat, sheet_name="FlatExport"),
+            file_name="FlatExport.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 else:
-    st.info("Faça upload do JSON do Trello para gerar o Excel.")
+    st.info("Faça upload do JSON do Trello para gerar as tabelas e baixar os XLSX.")
