@@ -211,7 +211,7 @@ if uploaded:
     st.metric("Linhas FlatExport", len(df_flat))
     st.metric("Linhas Explore", len(df_explore))
 
-    st.subheader("FlatExport (SEM filtro e SEM limite)")
+    st.subheader("FlatExport")
     st.dataframe(df_flat, use_container_width=True, height=700)
 
     st.subheader("Explore (pendências)")
