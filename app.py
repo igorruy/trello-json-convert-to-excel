@@ -10,12 +10,21 @@ import streamlit as st
 # ------------------------- Helpers -------------------------
 
 def _safe_dt(dt_str: str | None):
+    """
+    Converte ISO do Trello para datetime.
+    IMPORTANTE: Excel não suporta datetime com timezone. Então aqui já removemos tzinfo.
+    """
     if not dt_str:
         return None
     try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        # Ex.: "2025-01-01T10:00:00.000Z" -> "+00:00"
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        # Remove timezone (tz-aware -> naive), evitando erro no Excel
+        if getattr(dt, "tzinfo", None) is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
     except Exception:
-        return dt_str
+        return dt_str  # fallback: mantém string
 
 
 def _label_display(lbl: dict) -> str:
@@ -62,26 +71,72 @@ def _pick_excel_engine() -> str:
         pass
 
     raise ModuleNotFoundError(
-        "Nenhum engine de Excel disponível. Instale 'XlsxWriter' ou 'openpyxl' no requirements.txt."
+        "Nenhum engine de Excel disponível. Instale 'XlsxWriter' (recomendado) ou 'openpyxl' no requirements.txt."
     )
 
 
+def _sanitize_value_for_excel(v: Any) -> Any:
+    """
+    Sanitiza valores para Excel:
+    - datetime tz-aware -> naive
+    - pandas Timestamp tz-aware -> naive
+    - dict/list -> JSON string
+    """
+    # pandas Timestamp
+    if isinstance(v, pd.Timestamp):
+        if v.tz is not None:
+            return v.tz_convert(None).to_pydatetime()
+        return v.to_pydatetime()
+
+    # python datetime
+    if isinstance(v, datetime):
+        if v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+    # dict/list (evita exportação problemática)
+    if isinstance(v, (dict, list)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+
+    return v
+
+
+def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica sanitização em todas as células, garantindo compatibilidade com Excel."""
+    if df.empty:
+        return df
+    out = df.copy()
+
+    # Aplica sanitização célula a célula
+    out = out.map(_sanitize_value_for_excel)
+
+    # Garante colunas únicas também (segurança extra)
+    out = _ensure_unique_columns(out)
+    return out
+
+
 def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
-    """Exporta um único DataFrame para XLSX (1 aba)."""
     engine = _pick_excel_engine()
     output = BytesIO()
+    df2 = sanitize_df_for_excel(df)
+
     with pd.ExcelWriter(output, engine=engine) as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name[:31])  # Excel limita 31 chars
+        df2.to_excel(writer, index=False, sheet_name=sheet_name[:31])
     return output.getvalue()
 
 
 def dfs_to_xlsx_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
-    """Exporta múltiplos DataFrames para XLSX (múltiplas abas)."""
     engine = _pick_excel_engine()
     output = BytesIO()
+
     with pd.ExcelWriter(output, engine=engine) as writer:
         for name, df in dfs.items():
-            df.to_excel(writer, index=False, sheet_name=name[:31])
+            df2 = sanitize_df_for_excel(df)
+            df2.to_excel(writer, index=False, sheet_name=name[:31])
+
     return output.getvalue()
 
 
@@ -189,7 +244,7 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
     if not df_cards.empty:
         df_cards = df_cards.merge(agg, how="left", on="card_id")
 
-    # FlatExport (1 linha por item)
+    # FlatExport
     if not df_checkitems.empty and not df_cards.empty:
         df_flat = df_checkitems.merge(df_cards, how="left", on="card_id")
 
@@ -213,7 +268,7 @@ def parse_trello_export(data: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFram
             ]
         )
 
-    # Segurança extra contra colunas duplicadas
+    # Segurança extra contra colunas duplicadas antes da UI
     df_cards = _ensure_unique_columns(df_cards)
     df_checklists = _ensure_unique_columns(df_checklists)
     df_checkitems = _ensure_unique_columns(df_checkitems)
@@ -238,10 +293,9 @@ if uploaded:
         st.error(f"Não consegui ler o JSON: {e}")
         st.stop()
 
-    # Parse
     df_cards, df_checkitems, df_checklists, df_flat = parse_trello_export(data)
 
-    # Prévia
+    # Prévia (não sanitiza aqui; já garantimos colunas únicas)
     st.subheader("Prévia - FlatExport (1 linha por item de checklist)")
     st.dataframe(df_flat.head(200), use_container_width=True)
 
@@ -254,11 +308,10 @@ if uploaded:
     with st.expander("Prévia - Checklists"):
         st.dataframe(df_checklists.head(200), use_container_width=True)
 
-    # Downloads
     st.divider()
     st.subheader("Exportação")
 
-    # 1) Consolidado
+    # Consolidado
     try:
         all_bytes = dfs_to_xlsx_bytes(
             {
@@ -278,8 +331,12 @@ if uploaded:
         st.error(str(e))
         st.info("Solução: adicione `XlsxWriter` (recomendado) ou `openpyxl` no requirements.txt.")
         st.stop()
+    except ValueError as e:
+        st.error(f"Erro ao exportar Excel: {e}")
+        st.info("Este app já sanitiza timezone em datetimes; se persistir, existe algum tipo de dado não suportado em alguma coluna.")
+        st.stop()
 
-    # 2) Individuais
+    # Individuais
     col1, col2 = st.columns(2)
 
     with col1:
