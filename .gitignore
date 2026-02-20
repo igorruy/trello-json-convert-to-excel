@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+.streamlit/
+.streamlit/secrets.toml
+node_modules/
+.vscode/
+.idea/
+*.xlsx
+*.xlsm
+*.xls
+*.log
+.DS_Store
+Thumbs.db
