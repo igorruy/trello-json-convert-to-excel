@@ -12,6 +12,7 @@ Aplicação em Streamlit que converte um arquivo JSON exportado do Trello em um 
   - FlatExport (união dos cards com checklist items)
 - Suporte dinâmico a campos personalizados (Custom Fields) do Trello.
 - Informações da última alteração do card: usuário, data/hora em formato pt-BR no fuso GMT-3 (Brasília) e resumo da alteração realizada.
+- Informações da última alteração do card: usuário, data/hora em formato pt-BR e resumo da alteração realizada.
 - Nomes de colunas do FlatExport mais intuitivos em português.
 
 ## Publicação
@@ -63,6 +64,7 @@ python -m streamlit run app.py
 
 ### Cards
 Informações principais do card (lista, título, conclusão por `dueComplete`, prazos, membros, etiquetas, links, datas de atividade e início, descrição), dados da última alteração (usuário, data/hora em formato pt-BR no fuso GMT-3 (Brasília) e alteração realizada) e também os campos personalizados do board (ex.: “Frente”, “Defeito”). A aba `Cards` do Excel usa nomes de colunas em português para essas informações.
+Informações principais do card (lista, título, conclusão por `dueComplete`, prazos, membros, etiquetas, links, datas de atividade e início, descrição), dados da última alteração (usuário, data/hora em formato pt-BR e alteração realizada) e também os campos personalizados do board (ex.: “Frente”, “Defeito”). A aba `Cards` do Excel usa nomes de colunas em português para essas informações.
 Fonte: parser em [app.py](file:///c:/Repositórios/trello-json-convert-to-excel/app.py).
 
 ### Checklists
@@ -134,6 +136,7 @@ Streamlit application that converts a Trello exported JSON into an Excel file wi
   - FlatExport (cards joined with checklist items)
 - Dynamic support for Trello Custom Fields.
 - Latest card change details: user, Brazilian-formatted date/time in GMT-3 (Brasília), and a summary of the performed change.
+- Latest card change details: user, Brazilian-formatted date/time, and a summary of the performed change.
 - Intuitive Portuguese column names in FlatExport.
 - “Explore” view has been removed as requested.
 
@@ -180,6 +183,7 @@ python -m streamlit run app.py
 ## Sheets & Columns
 ### Cards
 Card main information (list, title, `dueComplete`-based completion, due dates, members, labels, links, activity and start dates, description), latest change details (user, Brazilian-formatted date/time in GMT-3 (Brasília), and performed change), and also board Custom Fields (e.g., “Frente”, “Defeito”). The Excel `Cards` sheet uses Portuguese column names for these details.
+Card main information (list, title, `dueComplete`-based completion, due dates, members, labels, links, activity and start dates, description), latest change details (user, Brazilian-formatted date/time, and performed change), and also board Custom Fields (e.g., “Frente”, “Defeito”). The Excel `Cards` sheet uses Portuguese column names for these details.
 Source: parser in [app.py](file:///c:/Repositórios/trello-json-convert-to-excel/app.py).
 
 ### Checklists
