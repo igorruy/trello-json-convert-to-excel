@@ -62,7 +62,7 @@ python -m streamlit run app.py
 ## Abas e colunas
 
 ### Cards
-Informações principais do card (lista, título, conclusão por `dueComplete`, prazos, membros, etiquetas, links, datas de atividade e início, descrição), dados da última alteração (usuário, data/hora em formato pt-BR e alteração realizada) e também os campos personalizados do board (ex.: “Frente”, “Defeito”).
+Informações principais do card (lista, título, conclusão por `dueComplete`, prazos, membros, etiquetas, links, datas de atividade e início, descrição), dados da última alteração (usuário, data/hora em formato pt-BR e alteração realizada) e também os campos personalizados do board (ex.: “Frente”, “Defeito”). A aba `Cards` do Excel usa nomes de colunas em português para essas informações.
 Fonte: parser em [app.py](file:///c:/Repositórios/trello-json-convert-to-excel/app.py).
 
 ### Checklists
@@ -179,7 +179,7 @@ python -m streamlit run app.py
 
 ## Sheets & Columns
 ### Cards
-Card main information (list, title, `dueComplete`-based completion, due dates, members, labels, links, activity and start dates, description), latest change details (user, Brazilian-formatted date/time, and performed change), and also board Custom Fields (e.g., “Frente”, “Defeito”).
+Card main information (list, title, `dueComplete`-based completion, due dates, members, labels, links, activity and start dates, description), latest change details (user, Brazilian-formatted date/time, and performed change), and also board Custom Fields (e.g., “Frente”, “Defeito”). The Excel `Cards` sheet uses Portuguese column names for these details.
 Source: parser in [app.py](file:///c:/Repositórios/trello-json-convert-to-excel/app.py).
 
 ### Checklists

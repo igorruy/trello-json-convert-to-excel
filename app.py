@@ -56,6 +56,36 @@ def dfs_to_xlsx_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
+def rename_cards_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    rename_map = {
+        "board_id": "Board ID",
+        "card_id": "Card ID",
+        "idShort": "Número",
+        "card_name": "Título",
+        "list_id": "Lista ID",
+        "list_name": "Lista",
+        "dueComplete": "Concluído",
+        "card_due": "Data de Entrega",
+        "labels": "Etiquetas",
+        "members": "Membros",
+        "member_ids": "IDs de Membros",
+        "dias_em_atraso": "Dias em atraso",
+        "tempo_em_lista": "Tempo em lista",
+        "url": "URL",
+        "shortLink": "Link curto",
+        "card_dateLastActivity": "Última atividade",
+        "card_start": "Início",
+        "card_desc": "Descrição",
+        "ultima_alteracao_usuario": "Última alteração - usuário",
+        "ultima_alteracao_data_hora": "Última alteração - data/hora",
+        "ultima_alteracao_realizada": "Última alteração - realizada",
+    }
+    return df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+
 # =========================
 # Trello helpers
 # =========================
@@ -467,8 +497,10 @@ if uploaded:
     st.subheader("FlatExport (sem filtro)")
     st.dataframe(df_flat, use_container_width=True, height=700)
 
+    df_cards_export = rename_cards_columns(df_cards)
+
     with st.expander("Cards"):
-        st.dataframe(df_cards, use_container_width=True, height=700)
+        st.dataframe(df_cards_export, use_container_width=True, height=700)
 
     with st.expander("Checklists"):
         st.dataframe(df_checklists, use_container_width=True, height=700)
@@ -479,7 +511,7 @@ if uploaded:
     # ----------------- Exportação
     st.divider()
     excel_bytes = dfs_to_xlsx_bytes({
-        "Cards": df_cards,
+        "Cards": df_cards_export,
         "Checklists": df_checklists,
         "ChecklistItems": df_items,
         "FlatExport": df_flat
