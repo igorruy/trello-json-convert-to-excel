@@ -56,6 +56,36 @@ def dfs_to_xlsx_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     return output.getvalue()
 
 
+def rename_cards_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    rename_map = {
+        "board_id": "Board ID",
+        "card_id": "Card ID",
+        "idShort": "Número",
+        "card_name": "Título",
+        "list_id": "Lista ID",
+        "list_name": "Lista",
+        "dueComplete": "Concluído",
+        "card_due": "Data de Entrega",
+        "labels": "Etiquetas",
+        "members": "Membros",
+        "member_ids": "IDs de Membros",
+        "dias_em_atraso": "Dias em atraso",
+        "tempo_em_lista": "Tempo em lista",
+        "url": "URL",
+        "shortLink": "Link curto",
+        "card_dateLastActivity": "Última atividade",
+        "card_start": "Início",
+        "card_desc": "Descrição",
+        "ultima_alteracao_usuario": "Última alteração - usuário",
+        "ultima_alteracao_data_hora": "Última alteração - data/hora",
+        "ultima_alteracao_realizada": "Última alteração - realizada",
+    }
+    return df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+
 # =========================
 # Trello helpers
 # =========================
@@ -89,6 +119,129 @@ def _calc_prazo(card_due, due_complete: bool, report_dt: datetime) -> str:
         return "Em dia"
 
 
+def _format_pt_br_dt(v) -> str | None:
+    dt = _safe_dt(v)
+    if dt is None:
+        return None
+    return dt.strftime("%d/%m/%Y %H:%M:%S")
+
+
+def _member_display(member: dict | None, members: Dict[str, str]) -> str | None:
+    if not member:
+        return None
+    member_id = member.get("id")
+    return (
+        member.get("fullName")
+        or member.get("username")
+        or members.get(member_id)
+        or member_id
+    )
+
+
+def _format_action_field_value(value: Any) -> str:
+    if value is None:
+        return "vazio"
+    if isinstance(value, bool):
+        return "sim" if value else "não"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    formatted_dt = _format_pt_br_dt(value)
+    if formatted_dt:
+        return formatted_dt
+    return str(value)
+
+
+def _format_action_description(action: dict, lists: Dict[str, str]) -> str:
+    action_type = action.get("type") or "ação"
+    action_data = action.get("data") or {}
+    card = action_data.get("card") or {}
+    old = action_data.get("old") or {}
+
+    action_labels = {
+        "addAttachmentToCard": "Adicionou anexo",
+        "addChecklistToCard": "Adicionou checklist",
+        "addMemberToCard": "Adicionou membro",
+        "commentCard": "Comentou",
+        "convertToCardFromCheckItem": "Converteu item de checklist em card",
+        "copyCard": "Copiou card",
+        "createCard": "Criou card",
+        "deleteAttachmentFromCard": "Removeu anexo",
+        "deleteCard": "Excluiu card",
+        "emailCard": "Enviou e-mail ao card",
+        "moveCardFromBoard": "Moveu card de outro quadro",
+        "moveCardToBoard": "Moveu card para outro quadro",
+        "removeChecklistFromCard": "Removeu checklist",
+        "removeMemberFromCard": "Removeu membro",
+        "updateCard": "Atualizou card",
+    }
+    label = action_labels.get(action_type, action_type)
+
+    if action_type == "commentCard":
+        text = (action_data.get("text") or "").strip()
+        return f"{label}: {text}" if text else label
+
+    if action_type == "updateCard" and old:
+        changes = []
+        for field, previous in old.items():
+            current = card.get(field)
+            if field == "idList":
+                previous = lists.get(previous, previous)
+                current = lists.get(current, current)
+                field_label = "lista"
+            elif field == "dueComplete":
+                field_label = "conclusão do prazo"
+            elif field == "due":
+                field_label = "data de entrega"
+            elif field == "name":
+                field_label = "título"
+            elif field == "desc":
+                field_label = "descrição"
+            elif field == "closed":
+                field_label = "arquivamento"
+            else:
+                field_label = field
+            changes.append(
+                f"{field_label}: {_format_action_field_value(previous)} → {_format_action_field_value(current)}"
+            )
+        return f"{label}: " + "; ".join(changes)
+
+    member = action_data.get("member") or action_data.get("memberCreator")
+    if action_type in {"addMemberToCard", "removeMemberFromCard"} and member:
+        member_name = member.get("fullName") or member.get("username") or member.get("id")
+        return f"{label}: {member_name}"
+
+    checklist = action_data.get("checklist") or {}
+    if action_type in {"addChecklistToCard", "removeChecklistFromCard"} and checklist.get("name"):
+        return f"{label}: {checklist.get('name')}"
+
+    attachment = action_data.get("attachment") or {}
+    if action_type in {"addAttachmentToCard", "deleteAttachmentFromCard"} and attachment.get("name"):
+        return f"{label}: {attachment.get('name')}"
+
+    card_name = card.get("name")
+    return f"{label}: {card_name}" if card_name else label
+
+
+def _latest_card_actions(data: dict, members: Dict[str, str], lists: Dict[str, str]) -> Dict[str, dict]:
+    latest_by_card = {}
+    for action in data.get("actions", []) or []:
+        card_id = ((action.get("data") or {}).get("card") or {}).get("id")
+        action_dt = _safe_dt(action.get("date"))
+        if not card_id or action_dt is None:
+            continue
+        previous = latest_by_card.get(card_id)
+        if previous and previous["_dt"] >= action_dt:
+            continue
+        member = action.get("memberCreator") or (action.get("data") or {}).get("memberCreator")
+        latest_by_card[card_id] = {
+            "_dt": action_dt,
+            "ultima_alteracao_usuario": _member_display(member, members),
+            "ultima_alteracao_data_hora": _format_pt_br_dt(action.get("date")),
+            "ultima_alteracao_realizada": _format_action_description(action, lists),
+        }
+    return latest_by_card
+
+
 # =========================
 # Parser principal
 # =========================
@@ -104,6 +257,7 @@ def parse_trello(data: dict, report_dt: datetime, derive_cfg: Dict[str, Any] | N
 
     custom_fields = data.get("customFields", []) or []
     custom_fields_by_id = {cf.get("id"): cf for cf in custom_fields if cf.get("id")}
+    latest_actions = _latest_card_actions(data, members, lists)
 
     def _custom_field_value(item: dict):
         cf_def = custom_fields_by_id.get(item.get("idCustomField"))
@@ -169,7 +323,13 @@ def parse_trello(data: dict, report_dt: datetime, derive_cfg: Dict[str, Any] | N
             "card_dateLastActivity": _safe_dt(c.get("dateLastActivity")),
             "card_start": _safe_dt(c.get("start")),
             "card_desc": c.get("desc"),
+            "ultima_alteracao_usuario": None,
+            "ultima_alteracao_data_hora": None,
+            "ultima_alteracao_realizada": None,
         }
+
+        latest_action = latest_actions.get(c.get("id"), {})
+        card_data.update({k: v for k, v in latest_action.items() if not k.startswith("_")})
 
         if custom_values:
             card_data.update(custom_values)
@@ -279,6 +439,9 @@ def parse_trello(data: dict, report_dt: datetime, derive_cfg: Dict[str, Any] | N
             "card_dateLastActivity": "Última atividade",
             "card_start": "Início",
             "card_desc": "Descrição",
+            "ultima_alteracao_usuario": "Última alteração - usuário",
+            "ultima_alteracao_data_hora": "Última alteração - data/hora",
+            "ultima_alteracao_realizada": "Última alteração - realizada",
             "checklist_id": "Checklist ID",
             "checklist_name": "Checklist",
             "checkitem_id": "Item ID",
@@ -334,8 +497,10 @@ if uploaded:
     st.subheader("FlatExport (sem filtro)")
     st.dataframe(df_flat, use_container_width=True, height=700)
 
+    df_cards_export = rename_cards_columns(df_cards)
+
     with st.expander("Cards"):
-        st.dataframe(df_cards, use_container_width=True, height=700)
+        st.dataframe(df_cards_export, use_container_width=True, height=700)
 
     with st.expander("Checklists"):
         st.dataframe(df_checklists, use_container_width=True, height=700)
@@ -346,7 +511,7 @@ if uploaded:
     # ----------------- Exportação
     st.divider()
     excel_bytes = dfs_to_xlsx_bytes({
-        "Cards": df_cards,
+        "Cards": df_cards_export,
         "Checklists": df_checklists,
         "ChecklistItems": df_items,
         "FlatExport": df_flat
