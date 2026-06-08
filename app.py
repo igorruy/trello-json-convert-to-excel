@@ -1,6 +1,6 @@
 import json
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Tuple
 
 import pandas as pd
@@ -99,6 +99,18 @@ def _safe_dt(v):
         return None
 
 
+def _safe_dt_with_tz(v):
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 def _label_display(lbl):
     return (lbl.get("name") or "").strip() or f"(label:{lbl.get('color')})"
 
@@ -120,10 +132,11 @@ def _calc_prazo(card_due, due_complete: bool, report_dt: datetime) -> str:
 
 
 def _format_pt_br_dt(v) -> str | None:
-    dt = _safe_dt(v)
+    dt = _safe_dt_with_tz(v)
     if dt is None:
         return None
-    return dt.strftime("%d/%m/%Y %H:%M:%S")
+    brasilia_dt = dt.astimezone(timezone(timedelta(hours=-3)))
+    return brasilia_dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
 def _member_display(member: dict | None, members: Dict[str, str]) -> str | None:
@@ -149,6 +162,13 @@ def _format_action_field_value(value: Any) -> str:
     if formatted_dt:
         return formatted_dt
     return str(value)
+
+
+def _list_display(list_data: dict | None, lists: Dict[str, str]) -> str | None:
+    if not list_data:
+        return None
+    list_id = list_data.get("id")
+    return list_data.get("name") or lists.get(list_id) or list_id
 
 
 def _format_action_description(action: dict, lists: Dict[str, str]) -> str:
@@ -181,6 +201,14 @@ def _format_action_description(action: dict, lists: Dict[str, str]) -> str:
         return f"{label}: {text}" if text else label
 
     if action_type == "updateCard" and old:
+        list_before = _list_display(action_data.get("listBefore"), lists)
+        list_after = _list_display(action_data.get("listAfter"), lists)
+        if old.get("idList"):
+            list_before = list_before or lists.get(old.get("idList"), old.get("idList"))
+            list_after = list_after or lists.get(card.get("idList"), card.get("idList"))
+        if list_before and list_after and list_before != list_after:
+            return f"Atualizou o card {list_before} → {list_after}"
+
         changes = []
         for field, previous in old.items():
             current = card.get(field)
@@ -198,6 +226,8 @@ def _format_action_description(action: dict, lists: Dict[str, str]) -> str:
                 field_label = "descrição"
             elif field == "closed":
                 field_label = "arquivamento"
+            elif field == "pos":
+                field_label = "posição"
             else:
                 field_label = field
             changes.append(
